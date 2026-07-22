@@ -1,7 +1,8 @@
 """
-어제의 박스오피스 분석 대시보드
+박스오피스 분석 대시보드
 - KOBIS(영화진흥위원회) 오픈API 사용
-- 오늘 데이터는 아직 집계 전이므로 '어제(한국시간 기준)' 데이터를 보여준다.
+- 달력에서 원하는 날짜를 골라 그날의 박스오피스를 조회한다.
+- 오늘 데이터는 아직 집계 전이므로, 선택 가능한 가장 늦은 날짜는 '어제(한국시간 기준)'까지다.
 """
 
 import streamlit as st
@@ -9,13 +10,13 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # 파이썬 내장 시간대 라이브러리 (별도 설치 불필요)
-import plotly.express as px
+import plotly.graph_objects as go
 
 # ------------------------------------------------------------------
 # 1. 기본 페이지 설정
 # ------------------------------------------------------------------
-st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
-st.title("🎬 어제의 박스오피스 대시보드")
+st.set_page_config(page_title="박스오피스 대시보드", page_icon="🎬", layout="wide")
+st.title("🎬 박스오피스 분석 대시보드")
 
 # ------------------------------------------------------------------
 # 2. 인증키 불러오기 (절대 코드에 직접 쓰지 않음!)
@@ -33,17 +34,26 @@ except KeyError:
     st.stop()  # 키가 없으면 여기서 앱 실행을 멈춘다.
 
 # ------------------------------------------------------------------
-# 3. '어제' 날짜를 한국 시간(Asia/Seoul) 기준으로 계산
-#    - 서버 시계가 외국 기준일 수 있으므로 반드시 시간대를 명시한다.
+# 3. 조회 날짜 선택 (달력에서 고르기)
+#    - '오늘(한국시간)'은 아직 집계가 끝나지 않았으므로 고를 수 있는
+#      가장 늦은 날짜는 '어제'까지로 제한한다.
+#    - 서버 시계가 외국 기준일 수 있으므로 반드시 Asia/Seoul로 계산한다.
 # ------------------------------------------------------------------
 kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
 yesterday_kst = kst_now - timedelta(days=1)
-target_dt = yesterday_kst.strftime("%Y%m%d")  # yyyymmdd 형식 (예: 20260721)
+max_selectable_date = yesterday_kst.date()  # 달력에서 고를 수 있는 최댓값
 
-# 화면에 보여줄 사람이 읽기 좋은 날짜 형식
-target_dt_display = yesterday_kst.strftime("%Y년 %m월 %d일")
+selected_date = st.date_input(
+    "📅 조회할 날짜를 선택하세요",
+    value=max_selectable_date,          # 기본값은 어제
+    max_value=max_selectable_date,       # 오늘은 아직 집계 전이라 선택 불가
+    format="YYYY-MM-DD",
+)
 
-st.caption(f"📅 조회 기준일(한국시간): {target_dt_display}  ·  당일 데이터는 아직 집계 전이라 어제 데이터를 보여줍니다.")
+target_dt = selected_date.strftime("%Y%m%d")  # API용 yyyymmdd 형식
+target_dt_display = selected_date.strftime("%Y년 %m월 %d일")
+
+st.caption(f"👉 **{target_dt_display}** 박스오피스를 보고 있어요. (당일 데이터는 다음 날 집계되므로 오늘은 선택할 수 없어요)")
 
 # ------------------------------------------------------------------
 # 4. KOBIS API 호출
@@ -139,7 +149,7 @@ df["영화명"] = df.apply(make_movie_name, axis=1)
 # ------------------------------------------------------------------
 top_movie = df.iloc[0]
 
-st.subheader("🥇 어제의 1위 영화")
+st.subheader(f"🥇 {target_dt_display}의 1위 영화")
 
 col1, col2, col3 = st.columns(3)
 col1.metric(
@@ -154,22 +164,62 @@ st.divider()
 
 # ------------------------------------------------------------------
 # 10. 관객수 상위 5편 막대그래프
+#     - 1~3위는 금/은/동 메달 색으로, 4~5위는 톤 다운된 붉은색으로 강조
+#     - 가로 막대 + 순위 뱃지 + 영화명 + 관객수를 한 번에 보여준다
 # ------------------------------------------------------------------
 st.subheader("📊 관객수 상위 5편")
 
-top5 = df.nlargest(5, "audiCnt")
+top5 = df.nlargest(5, "audiCnt").sort_values("audiCnt", ascending=True)  # 가로 막대는 아래→위로 그려지므로 오름차순 정렬
 
-fig = px.bar(
-    top5,
-    x="movieNm",
-    y="audiCnt",
-    text="audiCnt",
-    labels={"movieNm": "영화명", "audiCnt": "일일 관객수"},
-    color="audiCnt",
-    color_continuous_scale="Reds",
+# 순위별 메달 이모지 + 색상 지정
+medal_emojis = {1: "🥇", 2: "🥈", 3: "🥉"}
+bar_colors = []
+for rank in top5["rank"]:
+    if rank == 1:
+        bar_colors.append("#FFD54A")   # 골드
+    elif rank == 2:
+        bar_colors.append("#C7CDD6")   # 실버
+    elif rank == 3:
+        bar_colors.append("#D8935A")   # 브론즈
+    else:
+        bar_colors.append("#E4572E")   # 그 외는 포인트 레드
+
+# y축에 표시할 라벨: 메달(또는 순위) + 영화명
+y_labels = [
+    f"{medal_emojis.get(rank, f'{int(rank)}위')}  {name}"
+    for rank, name in zip(top5["rank"], top5["movieNm"])
+]
+
+fig = go.Figure(
+    go.Bar(
+        x=top5["audiCnt"],
+        y=y_labels,
+        orientation="h",
+        marker=dict(
+            color=bar_colors,
+            line=dict(color="rgba(0,0,0,0.15)", width=1),
+        ),
+        text=[f"{int(v):,}명" for v in top5["audiCnt"]],
+        textposition="outside",
+        textfont=dict(size=14, family="Arial Black"),
+        hovertemplate="%{y}<br>일일 관객수: %{x:,}명<extra></extra>",
+    )
 )
-fig.update_traces(texttemplate="%{text:,}명", textposition="outside")
-fig.update_layout(showlegend=False, coloraxis_showscale=False)
+
+fig.update_layout(
+    height=380,
+    margin=dict(l=10, r=60, t=20, b=10),
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
+    xaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
+    yaxis=dict(
+        showgrid=False,
+        tickfont=dict(size=15),
+        automargin=True,
+    ),
+    font=dict(family="Arial", size=13),
+    showlegend=False,
+)
 
 st.plotly_chart(fig, use_container_width=True)
 
